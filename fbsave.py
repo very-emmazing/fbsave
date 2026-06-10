@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["playwright>=1.45"]
+# ///
 """
 fbsave.py — Beweissicherung von Kommentaren unter einem oeffentlichen Facebook-Post.
 
@@ -7,13 +11,17 @@ dorthin umgeleitet), stellt die Sortierung auf "Alle Kommentare", faltet alle
 Kommentare, Antworten und abgeschnittene Texte ("Mehr anzeigen") auf und
 dokumentiert sie:
 
-  - debug_NN_<schritt>.png/.html  Screenshot + HTML-Dump nach jedem Schritt
-  - debug_structure_*.json        DOM-Diagnose (Artikel, aria-Labels, Buttons)
-  - debug_graphql_times.json      aus GraphQL geerntete exakte Zeitstempel
   - comment_NNN.png               Einzel-Screenshot pro Kommentar/Antwort
   - full_page.png                 Gesamt-Screenshot der aufgefalteten Seite
   - comments.csv                  author, profile_url, timestamps, text, ...
   - manifest.json                 UTC-Zeitstempel des Laufs + SHA256 aller Dateien
+
+Mit --debug zusaetzlich:
+
+  - debug_NN_<schritt>.png/.html  Screenshot + HTML-Dump nach jedem Schritt
+  - debug_structure_*.json        DOM-Diagnose (Artikel, aria-Labels, Buttons)
+  - debug_graphql_times.json      aus GraphQL geerntete exakte Zeitstempel
+  - ausfuehrliches Log statt der knappen Fortschrittsanzeige
 
 Zeitstempel: Facebook liefert die exakte Kommentarzeit (Unix-Epoch) im
 eingebetteten Relay-/GraphQL-JSON mit. Wo eine Kommentar-ID zugeordnet werden
@@ -21,12 +29,13 @@ kann, ist timestamp_utc EXAKT (timestamp_source=graphql_exact). Nur als
 Fallback wird die angezeigte Relativzeit ("vor 5 Tagen") relativ zur
 Capture-Zeit umgerechnet (timestamp_source=computed_from_relative).
 
-Aufruf (im Projekt-venv ./fbsave/):
+Aufruf (uv erledigt venv + Abhaengigkeiten automatisch):
 
-    ./fbsave/bin/python fbsave.py                    # sichtbarer Browser
-    ./fbsave/bin/python fbsave.py --headless
-    ./fbsave/bin/python fbsave.py --url <POST_URL>
-    ./fbsave/bin/python fbsave.py --selftest         # nur Zeitparser testen
+    uv run fbsave.py                    # sichtbarer Browser
+    uv run fbsave.py --headless
+    uv run fbsave.py --debug            # mit Debug-Dateien + ausfuehrlichem Log
+    uv run fbsave.py --url <POST_URL>
+    uv run fbsave.py --selftest         # nur Zeitparser testen
 """
 
 import argparse
@@ -48,6 +57,54 @@ DEFAULT_URL = (
     "https://www.facebook.com/neue.szene.augsburg/posts/"
     "pfbid02RgKgpshoRqspLtfHu2zwkmwbSXh5tTqFpxNXmvkDv7e4anhHS1zwHKSbsxKjC89Sl"
 )
+
+# ---------------------------------------------------------------------------
+# Terminal-Ausgabe
+# ---------------------------------------------------------------------------
+
+class UI:
+    """Normal: knapper, freundlicher Fortschritt + Ergebnisse.
+    --debug: ausfuehrliches Log (dann keine In-Place-Fortschrittszeile)."""
+
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+        self.tty = sys.stdout.isatty()
+        self._progress_open = False
+
+    def _close_progress(self) -> None:
+        if self._progress_open:
+            print(flush=True)
+            self._progress_open = False
+
+    def say(self, msg: str = "") -> None:
+        """Immer sichtbar."""
+        self._close_progress()
+        print(msg, flush=True)
+
+    def detail(self, msg: str) -> None:
+        """Nur mit --debug sichtbar."""
+        if self.debug:
+            self._close_progress()
+            print(msg, flush=True)
+
+    def warn(self, msg: str) -> None:
+        self._close_progress()
+        print(f"⚠️  {msg}", flush=True)
+
+    def progress(self, msg: str) -> None:
+        """Sich in-place aktualisierende Fortschrittszeile (nur ohne --debug)."""
+        if self.debug or not self.tty:
+            return
+        print(f"\r   {msg[:90]:<90}", end="", flush=True)
+        self._progress_open = True
+
+    def done(self, msg: str) -> None:
+        """Fortschrittszeile abschliessen und Ergebnis zeigen."""
+        self._close_progress()
+        print(f"✅ {msg}", flush=True)
+
+
+ui = UI()
 
 # ---------------------------------------------------------------------------
 # Text-Muster (deutsch + englisch; Texte am 2026-06-10 live verifiziert)
@@ -327,36 +384,39 @@ def extract_ids_from_links(hrefs: "list[str]") -> "tuple[str, str]":
 
 
 # ---------------------------------------------------------------------------
-# Debug-Hilfen (Screenshot + HTML + Strukturdiagnose pro Schritt)
+# Debug-Hilfen (Screenshot + HTML + Strukturdiagnose pro Schritt, nur --debug)
 # ---------------------------------------------------------------------------
 
 class Stepper:
     """Nummerierter Screenshot, optional HTML-Dump, Titel/URL-Ausgabe je Schritt."""
 
-    def __init__(self, outdir: Path):
+    def __init__(self, outdir: Path, enabled: bool):
         self.outdir = outdir
+        self.enabled = enabled
         self.counter = itertools.count(1)
 
     def step(self, page, name: str, save_html: bool = False) -> None:
+        if not self.enabled:
+            return
         n = next(self.counter)
         slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
         try:
             page.screenshot(path=str(self.outdir / f"debug_{n:02d}_{slug}.png"))
         except Exception as exc:
-            print(f"[STEP {n:02d}] {name}: Screenshot fehlgeschlagen: {exc}")
+            ui.detail(f"[STEP {n:02d}] {name}: Screenshot fehlgeschlagen: {exc}")
         if save_html:
             try:
                 (self.outdir / f"debug_{n:02d}_{slug}.html").write_text(
                     page.content(), encoding="utf-8")
             except Exception as exc:
-                print(f"[STEP {n:02d}] {name}: HTML-Dump fehlgeschlagen: {exc}")
+                ui.detail(f"[STEP {n:02d}] {name}: HTML-Dump fehlgeschlagen: {exc}")
         try:
             title = page.title()
         except Exception:
             title = "<nicht lesbar>"
-        print(f"[STEP {n:02d}] {name}")
-        print(f"          Titel: {title!r}")
-        print(f"          URL:   {page.url}", flush=True)
+        ui.detail(f"[STEP {n:02d}] {name}\n"
+                  f"          Titel: {title!r}\n"
+                  f"          URL:   {page.url}")
 
 
 _DIAG_JS = """
@@ -376,11 +436,9 @@ _DIAG_JS = """
 
 
 def dump_diagnostics(page, scope, outdir: Path, tag: str) -> dict:
-    """Schreibt eine DOM-Strukturdiagnose nach debug_structure_<tag>.json.
-
-    Damit laesst sich ohne erneuten Lauf erkennen, warum Selektoren nicht
-    greifen (welche aria-Labels / Button-Texte tatsaechlich vorhanden sind).
-    """
+    """DOM-Strukturdiagnose; mit --debug zusaetzlich als
+    debug_structure_<tag>.json gespeichert (zeigt ohne erneuten Lauf, warum
+    Selektoren nicht greifen)."""
     try:
         data = scope.evaluate(_DIAG_JS)
     except Exception as exc:
@@ -390,11 +448,13 @@ def dump_diagnostics(page, scope, outdir: Path, tag: str) -> dict:
         data["title"] = page.title()
     except Exception:
         pass
-    path = outdir / f"debug_structure_{tag}.json"
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"    Diagnose -> {path.name}: {data.get('n_articles', '?')} Artikel, "
-          f"{len(data.get('button_texts', []))} Button-Texte, "
-          f"{data.get('n_dialogs', '?')} Dialog(e)")
+    if ui.debug:
+        path = outdir / f"debug_structure_{tag}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+        ui.detail(f"    Diagnose -> {path.name}: {data.get('n_articles', '?')} Artikel, "
+                  f"{len(data.get('button_texts', []))} Button-Texte, "
+                  f"{data.get('n_dialogs', '?')} Dialog(e)")
     return data
 
 
@@ -419,6 +479,8 @@ class TimeHarvester:
                 self.times[cid] = int(epoch)
 
     def dump(self, outdir: Path) -> None:
+        if not ui.debug:
+            return
         path = outdir / "debug_graphql_times.json"
         path.write_text(json.dumps(
             {"sources_with_created_time": self.sources,
@@ -426,13 +488,29 @@ class TimeHarvester:
              "times_utc": {cid: datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
                            for cid, t in sorted(self.times.items())}},
             ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"    GraphQL-Ernte -> {path.name}: exakte Zeit fuer "
-              f"{len(self.times)} Kommentar-ID(s) aus {self.sources} Quelle(n)")
+        ui.detail(f"    GraphQL-Ernte -> {path.name}: exakte Zeit fuer "
+                  f"{len(self.times)} Kommentar-ID(s) aus {self.sources} Quelle(n)")
 
 
 # ---------------------------------------------------------------------------
 # Browser-Schritte
 # ---------------------------------------------------------------------------
+
+def launch_chromium(pw, headless: bool):
+    """Chromium starten; fehlende Browser-Binaries einmalig nachinstallieren."""
+    try:
+        return pw.chromium.launch(headless=headless)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "executable doesn't exist" not in msg and "playwright install" not in msg:
+            raise
+        ui.say("⬇️  Chromium fehlt noch — wird einmalig heruntergeladen, "
+               "das kann eine Minute dauern …")
+        import subprocess
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                       check=True)
+        return pw.chromium.launch(headless=headless)
+
 
 def handle_cookie_consent(page, stepper: Stepper) -> bool:
     for el in page.query_selector_all('button, input[type=submit], a, [role="button"]'):
@@ -443,15 +521,16 @@ def handle_cookie_consent(page, stepper: Stepper) -> bool:
             continue
         label = " ".join((label or "").split())
         if label and COOKIE_ACCEPT_RE.search(label):
-            print(f"    Cookie-Dialog gefunden, klicke: {label!r}")
+            ui.detail(f"    Cookie-Dialog gefunden, klicke: {label!r}")
             try:
                 el.click()
                 page.wait_for_timeout(2000)
             except Exception as exc:
-                print(f"    Klick: {exc}")
+                ui.detail(f"    Klick: {exc}")
+            ui.say("🍪 Cookie-Hinweis bestätigt")
             stepper.step(page, "nach_cookie_klick", save_html=True)
             return True
-    print("    Kein Cookie-Dialog gefunden (eingeloggt oder schon akzeptiert).")
+    ui.detail("    Kein Cookie-Dialog gefunden (eingeloggt oder schon akzeptiert).")
     return False
 
 
@@ -491,7 +570,7 @@ def click_button_matching(scope, pattern: str, exclude=None) -> Optional[str]:
         return scope.evaluate(_CLICK_BUTTON_JS,
                               {"pattern": pattern, "exclude": exclude or EXPAND_EXCLUDE})
     except Exception as exc:
-        print(f"    Button-Suche fehlgeschlagen: {exc}")
+        ui.detail(f"    Button-Suche fehlgeschlagen: {exc}")
         return None
 
 
@@ -505,9 +584,9 @@ def count_articles(scope) -> int:
 def switch_sort_to_all_comments(page, scope, stepper: Stepper) -> bool:
     clicked = click_button_matching(scope, SORT_BUTTON_RE, exclude=[])
     if not clicked:
-        print("    Kein Sortier-Umschalter gefunden (evtl. schon 'Alle Kommentare').")
+        ui.detail("    Kein Sortier-Umschalter gefunden (evtl. schon 'Alle Kommentare').")
         return False
-    print(f"    Sortier-Umschalter geklickt: {clicked!r}")
+    ui.detail(f"    Sortier-Umschalter geklickt: {clicked!r}")
     page.wait_for_timeout(1500)
     # Menue rendert als Portal auf Dokumentebene -> auf der ganzen Seite suchen
     target = None
@@ -521,14 +600,14 @@ def switch_sort_to_all_comments(page, scope, stepper: Stepper) -> bool:
             return null;
         }""", SORT_TARGET_RE)
     except Exception as exc:
-        print(f"    Menue-Klick fehlgeschlagen: {exc}")
+        ui.detail(f"    Menue-Klick fehlgeschlagen: {exc}")
     if target:
-        print(f"    Sortierung umgestellt auf: {target!r}")
+        ui.say(f"↕️  Sortierung umgestellt auf: {target}")
         page.wait_for_timeout(2500)
         stepper.step(page, "sortierung_alle_kommentare", save_html=True)
         return True
-    print("    WARNUNG: Menuepunkt 'Alle Kommentare' nicht gefunden — "
-          "Reihenfolge bleibt 'Relevanteste'; ggf. fehlen ausgeblendete Kommentare!")
+    ui.warn("Menuepunkt 'Alle Kommentare' nicht gefunden — Reihenfolge bleibt "
+            "'Relevanteste'; ggf. fehlen ausgeblendete Kommentare!")
     stepper.step(page, "sortier_menue_ohne_treffer", save_html=True)
     return False
 
@@ -537,6 +616,7 @@ def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> None:
     """Klickt alle Auffalt-Buttons (weitere Kommentare / Antworten / Mehr anzeigen),
     bis nichts mehr da ist. www = AJAX, kein Seitenwechsel."""
     idle = 0
+    visible = 0
     for round_no in range(1, max_rounds + 1):
         scope = get_scope(page)  # nach React-Re-Renders neu greifen
         clicked = click_button_matching(scope, EXPAND_RE)
@@ -544,13 +624,17 @@ def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> None:
             idle = 0
             page.wait_for_timeout(1200)
             drain()
-            print(f"    Runde {round_no}: {clicked!r} geklickt "
-                  f"({count_articles(scope)} Artikel sichtbar)")
+            visible = count_articles(scope)
+            ui.progress(f"Lade nach … Klick {round_no}, {visible} Kommentar-Elemente sichtbar")
+            ui.detail(f"    Runde {round_no}: {clicked!r} geklickt "
+                      f"({visible} Artikel sichtbar)")
             if round_no % 10 == 0:
                 stepper.step(page, f"auffalten_runde_{round_no}")
             continue
         # nichts gefunden: ans Ende scrollen (Lazy-Loading) und nochmal pruefen
         idle += 1
+        ui.progress(f"Prüfe auf weitere Inhalte … ({idle}/3, "
+                    f"{visible} Kommentar-Elemente sichtbar)")
         try:
             scope.evaluate(
                 "el => { const a = el.querySelectorAll('div[role=\"article\"]');"
@@ -560,11 +644,12 @@ def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> None:
         page.wait_for_timeout(1500)
         drain()
         if idle >= 3:
-            print(f"    Auffalten beendet nach {round_no} Runde(n), "
-                  f"{count_articles(get_scope(page))} Artikel sichtbar.")
+            visible = count_articles(get_scope(page))
+            ui.done(f"Alles aufgefaltet — {visible} Kommentar-Elemente sichtbar "
+                    f"({round_no} Runden)")
             return
-    print(f"    WARNUNG: --max-rounds ({max_rounds}) erreicht, "
-          f"moeglicherweise nicht alles aufgefaltet!")
+    ui.warn(f"--max-rounds ({max_rounds}) erreicht, "
+            f"moeglicherweise nicht alles aufgefaltet!")
 
 
 # ---------------------------------------------------------------------------
@@ -613,13 +698,15 @@ def parse_aria(aria: str) -> Optional[dict]:
 def extract_comments(page, scope, rows, seen, outdir: Path,
                      harvester: TimeHarvester, capture_time: datetime) -> None:
     articles = scope.query_selector_all('div[role="article"][aria-label]')
-    print(f"    {len(articles)} Artikel-Element(e) mit aria-Label gefunden.")
+    total = len(articles)
+    ui.detail(f"    {total} Artikel-Element(e) mit aria-Label gefunden.")
     skipped_aria = []
-    for art in articles:
+    for pos, art in enumerate(articles, 1):
+        ui.progress(f"Erfasse Kommentar {pos}/{total} …")
         try:
             data = art.evaluate(_EXTRACT_JS)
         except Exception as exc:
-            print(f"    WARNUNG: Artikel nicht lesbar (stale?): {exc}")
+            ui.warn(f"Artikel {pos} nicht lesbar (stale?): {exc}")
             continue
         meta = parse_aria(data["aria"])
         if meta is None:
@@ -655,7 +742,7 @@ def extract_comments(page, scope, rows, seen, outdir: Path,
             art.scroll_into_view_if_needed(timeout=5000)
             art.screenshot(path=str(outdir / shot))
         except Exception as exc:
-            print(f"    WARNUNG: Screenshot {shot} fehlgeschlagen: {exc}")
+            ui.warn(f"Screenshot {shot} fehlgeschlagen: {exc}")
             shot = ""
 
         row = {
@@ -676,14 +763,20 @@ def extract_comments(page, scope, rows, seen, outdir: Path,
         }
         rows.append(row)
         preview = (row["text"][:60] + "…") if len(row["text"]) > 60 else row["text"]
-        print(f"    [{index:03d}] {row['author']} ({row['timestamp_raw']}, "
-              f"{ts_source}): {preview!r}")
+        ui.detail(f"    [{index:03d}] {row['author']} ({row['timestamp_raw']}, "
+                  f"{ts_source}): {preview!r}")
+    ui.done(f"{len(rows)} Kommentare/Antworten erfasst")
     if skipped_aria:
-        path = outdir / "debug_skipped_arias.json"
-        path.write_text(json.dumps(skipped_aria, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
-        print(f"    {len(skipped_aria)} Artikel ohne Kommentar-aria-Muster "
-              f"uebersprungen -> {path.name}")
+        if ui.debug:
+            path = outdir / "debug_skipped_arias.json"
+            path.write_text(json.dumps(skipped_aria, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+            ui.detail(f"    {len(skipped_aria)} Artikel ohne Kommentar-aria-Muster "
+                      f"uebersprungen -> {path.name}")
+        else:
+            ui.warn(f"{len(skipped_aria)} Element(e) entsprachen keinem bekannten "
+                    f"Kommentar-Muster und wurden uebersprungen "
+                    f"(Details mit --debug).")
 
 
 # ---------------------------------------------------------------------------
@@ -724,9 +817,28 @@ def write_outputs(outdir: Path, rows, manifest: dict) -> None:
     with open(outdir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    print(f"\nErgebnis: {len(rows)} Kommentar(e)/Antwort(en)")
-    print(f"  CSV:      {csv_path}")
-    print(f"  Manifest: {outdir / 'manifest.json'}")
+    replies = sum(1 for r in rows if r["is_reply"] == "ja")
+    shots = sum(1 for r in rows if r["screenshot_file"])
+    sources = manifest["timestamp_sources"]
+    ts_parts = []
+    if sources.get("graphql_exact"):
+        ts_parts.append(f"{sources['graphql_exact']} exakt (von Facebook geliefert)")
+    if sources.get("computed_from_relative"):
+        ts_parts.append(f"{sources['computed_from_relative']} aus Relativzeit berechnet")
+    if sources.get("unparsed"):
+        ts_parts.append(f"{sources['unparsed']} nicht bestimmbar")
+
+    ui.say()
+    ui.say(f"📊 Ergebnis: {len(rows)} Beiträge gesichert — "
+           f"{len(rows) - replies} Kommentare, {replies} Antworten")
+    if ts_parts:
+        ui.say(f"   Zeitstempel: {', '.join(ts_parts)}")
+    ui.say()
+    ui.say(f"📁 Ordner:       {outdir}/")
+    ui.say(f"📄 Tabelle:      {csv_path}")
+    ui.say(f"🖼️  Screenshots:  {shots} × comment_NNN.png + full_page.png")
+    ui.say(f"🔏 Manifest:     {outdir / 'manifest.json'} "
+           f"(UTC-Zeitstempel + SHA256-Hashes)")
 
 
 # ---------------------------------------------------------------------------
@@ -739,12 +851,12 @@ def run(args) -> int:
     started = datetime.now(timezone.utc)
     outdir = Path(args.out) / f"capture_{started.strftime('%Y%m%dT%H%M%SZ')}"
     outdir.mkdir(parents=True, exist_ok=True)
-    print(f"Ausgabeverzeichnis: {outdir}")
 
     www_url = to_www(args.url)
-    print(f"Ziel-URL: {www_url}")
+    ui.say(f"🎯 Post: {www_url}")
+    ui.detail(f"Ausgabeverzeichnis: {outdir}")
 
-    stepper = Stepper(outdir)
+    stepper = Stepper(outdir, enabled=args.debug)
     harvester = TimeHarvester()
     rows: list = []
     seen: set = set()
@@ -754,6 +866,7 @@ def run(args) -> int:
         "loaded_url": www_url,
         "capture_started_utc": started.isoformat(),
         "python_version": platform.python_version(),
+        "debug_artifacts": args.debug,
         "note_timestamps": (
             "timestamp_source=graphql_exact: exakte Kommentarzeit (Unix-Epoch) aus "
             "dem von Facebook mitgelieferten GraphQL-JSON. "
@@ -770,7 +883,7 @@ def run(args) -> int:
 
     exit_code = 0
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=args.headless)
+        browser = launch_chromium(pw, args.headless)
         ctx_kwargs = {
             "locale": "de-DE",
             "viewport": {"width": 1280, "height": 1600},
@@ -778,10 +891,10 @@ def run(args) -> int:
         state = Path(args.state) if args.state else None
         if state and state.exists():
             ctx_kwargs["storage_state"] = str(state)
-            print(f"Login-Session aus {state} geladen.")
+            ui.say(f"🔑 Login-Session aus {state} geladen")
             manifest["used_storage_state"] = str(state)
         elif args.state:
-            print(f"WARNUNG: --state {args.state} existiert nicht, fahre ohne Login fort.")
+            ui.warn(f"--state {args.state} existiert nicht, fahre ohne Login fort.")
         context = browser.new_context(**ctx_kwargs)
         page = context.new_page()
         page.set_default_timeout(20000)
@@ -802,14 +915,18 @@ def run(args) -> int:
 
         try:
             # 1) Post laden
+            ui.progress("Lade Post …")
             page.goto(www_url, wait_until="load", timeout=60000)
             page.wait_for_timeout(4000)  # React-Hydration abwarten
+            ui.done("Post geladen")
             stepper.step(page, "post_geladen", save_html=True)
 
             # 2) Cookie-Consent (nur ohne Login relevant); danach neu laden
             if handle_cookie_consent(page, stepper):
+                ui.progress("Lade Post neu …")
                 page.goto(www_url, wait_until="load", timeout=60000)
                 page.wait_for_timeout(4000)
+                ui.done("Post nach Cookie-Bestätigung neu geladen")
                 stepper.step(page, "post_nach_cookie_neu_geladen", save_html=True)
 
             scope = get_scope(page)
@@ -823,32 +940,34 @@ def run(args) -> int:
                     pass
                 if LOGIN_WALL_RE.search(body_text):
                     stepper.step(page, "login_wand", save_html=True)
-                    print("\nFEHLER: Facebook verlangt einen Login fuer diesen Post.")
-                    print("Abhilfe: einmalig  python save_login.py  ausfuehren und "
-                          "erneut starten (state.json wird automatisch benutzt).")
+                    ui.say("")
+                    ui.say("❌ Facebook verlangt einen Login fuer diesen Post.")
+                    ui.say("   Abhilfe: einmalig  uv run save_login.py  ausfuehren und "
+                           "erneut starten (state.json wird automatisch benutzt).")
                     manifest["aborted"] = "login_wall"
                     return 2
-                print("\nWARNUNG: Keine Kommentar-Artikel gefunden — "
-                      "Diagnose-Dateien (debug_structure_*.json, *.html) pruefen!")
+                ui.warn("Keine Kommentar-Artikel gefunden — bitte mit --debug "
+                        "erneut laufen lassen und Diagnose-Dateien pruefen!")
 
             capture_time = datetime.now(timezone.utc).astimezone()
 
             # 3) Sortierung auf "Alle Kommentare" stellen
-            print("\n== Sortierung umstellen ==")
+            ui.detail("\n== Sortierung umstellen ==")
             manifest["sorted_to_all_comments"] = \
                 switch_sort_to_all_comments(page, get_scope(page), stepper)
             drain()
 
             # 4) Alles auffalten (Kommentare, Antworten, 'Mehr anzeigen')
-            print("\n== Kommentare/Antworten auffalten ==")
+            ui.detail("\n== Kommentare/Antworten auffalten ==")
             expand_everything(page, stepper, drain, args.max_rounds)
             stepper.step(page, "fertig_aufgefaltet", save_html=True)
 
             # 5) Gesamt-Screenshots
+            ui.progress("Erstelle Gesamt-Screenshot …")
             try:
                 page.screenshot(path=str(outdir / "full_page.png"), full_page=True)
             except Exception as exc:
-                print(f"    WARNUNG: full_page.png fehlgeschlagen: {exc}")
+                ui.warn(f"full_page.png fehlgeschlagen: {exc}")
             scope = get_scope(page)
             try:
                 scope.screenshot(path=str(outdir / "full_dialog.png"))
@@ -858,7 +977,7 @@ def run(args) -> int:
             manifest["final_url"] = page.url
 
             # 6) Extraktion
-            print("\n== Kommentare extrahieren ==")
+            ui.detail("\n== Kommentare extrahieren ==")
             drain()
             harvester.feed(page.content())  # initial eingebettetes Relay-JSON
             harvester.dump(outdir)
@@ -866,11 +985,11 @@ def run(args) -> int:
             extract_comments(page, scope, rows, seen, outdir, harvester, capture_time)
 
         except KeyboardInterrupt:
-            print("\nAbgebrochen — bisherige Daten werden trotzdem gespeichert.")
+            ui.say("\n⏹ Abgebrochen — bisherige Daten werden trotzdem gespeichert.")
             manifest["aborted"] = "keyboard_interrupt"
             exit_code = 130
         except Exception:
-            print("\nFEHLER — bisherige Daten werden trotzdem gespeichert:")
+            ui.say("\n❌ FEHLER — bisherige Daten werden trotzdem gespeichert:")
             traceback.print_exc()
             manifest["aborted"] = "exception"
             manifest["error"] = traceback.format_exc()
@@ -887,12 +1006,16 @@ def run(args) -> int:
 
 
 def main() -> int:
+    global ui
     ap = argparse.ArgumentParser(
         description="Dokumentiert alle Kommentare unter einem oeffentlichen "
                     "Facebook-Post (Screenshots + CSV + Manifest).")
     ap.add_argument("--url", default=DEFAULT_URL, help="URL des Facebook-Posts")
     ap.add_argument("--headless", action="store_true",
                     help="Browser unsichtbar laufen lassen (Standard: sichtbar)")
+    ap.add_argument("--debug", action="store_true",
+                    help="Debug-Modus: Schritt-Screenshots, HTML-Dumps, "
+                         "DOM-Diagnosen und ausfuehrliches Log")
     ap.add_argument("--state", default="state.json",
                     help="Playwright storage_state mit Login-Session (optional; "
                          "wird ignoriert, wenn die Datei fehlt)")
@@ -903,6 +1026,7 @@ def main() -> int:
                     help="Nur den Zeitstempel-Parser testen (kein Browser)")
     args = ap.parse_args()
 
+    ui = UI(debug=args.debug)
     if args.selftest:
         return selftest()
     return run(args)

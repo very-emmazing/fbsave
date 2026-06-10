@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["playwright>=1.45"]
+# ///
 """
 save_login.py — Einmalig manuell bei Facebook einloggen und die Session
-als state.json speichern, damit fbsave.py sie mit --state state.json
-wiederverwenden kann (nur noetig, wenn der Post ohne Login nicht erreichbar ist).
+als state.json speichern, damit fbsave.py sie automatisch wiederverwenden
+kann (nur noetig, wenn der Post ohne Login nicht erreichbar ist).
 
 Ablauf:
-  1. python save_login.py
+  1. uv run save_login.py
   2. Im geoeffneten Browserfenster normal einloggen (inkl. 2FA falls aktiv)
   3. Zurueck im Terminal Enter druecken -> state.json wird geschrieben
 
@@ -13,27 +17,41 @@ state.json enthaelt deine Session-Cookies — nicht weitergeben, nicht committen
 (steht in .gitignore).
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
 STATE_FILE = "state.json"
 
 
+def launch_chromium(pw):
+    try:
+        return pw.chromium.launch(headless=False)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "executable doesn't exist" not in msg and "playwright install" not in msg:
+            raise
+        print("⬇️  Chromium fehlt noch — wird einmalig heruntergeladen …")
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                       check=True)
+        return pw.chromium.launch(headless=False)
+
+
 def main() -> int:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
+        browser = launch_chromium(pw)
         context = browser.new_context(locale="de-DE")
         page = context.new_page()
         page.goto("https://www.facebook.com/login", wait_until="load")
-        print("Bitte im Browserfenster einloggen.")
-        input("Danach hier Enter druecken, um die Session zu speichern... ")
+        print("🔑 Bitte im Browserfenster einloggen.")
+        input("   Danach hier Enter druecken, um die Session zu speichern... ")
         context.storage_state(path=STATE_FILE)
         browser.close()
 
-    print(f"Session gespeichert: {Path(STATE_FILE).resolve()}")
-    print("Jetzt:  python fbsave.py --state state.json")
+    print(f"✅ Session gespeichert: {Path(STATE_FILE).resolve()}")
+    print("   Jetzt:  uv run fbsave.py")
     return 0
 
 

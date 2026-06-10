@@ -13,32 +13,70 @@ Elemente; Autor und Relativzeit stehen im `aria-label`, die **exakte**
 Kommentarzeit (Unix-Epoch) wird aus dem von Facebook mitgelieferten
 Relay-/GraphQL-JSON geerntet.
 
-## Setup
+## Setup & Start (empfohlen: uv)
 
-Das Projekt-venv liegt in `./fbsave/`. Falls Chromium fehlt:
+Die Abhängigkeiten stehen als Inline-Metadaten (PEP 723) im Skript —
+[uv](https://docs.astral.sh/uv/) kümmert sich damit automatisch um Python,
+virtualenv und Playwright; fehlendes Chromium lädt das Skript beim ersten
+Start selbst nach:
 
 ```bash
-./fbsave/bin/python -m playwright install chromium
+brew install uv      # einmalig (oder: curl -LsSf https://astral.sh/uv/install.sh | sh)
+
+cd ~/dev/fbsave
+uv run fbsave.py     # das ist alles
 ```
+
+<details>
+<summary>Alternative: klassisches venv (ohne uv)</summary>
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install playwright
+./.venv/bin/python -m playwright install chromium
+./.venv/bin/python fbsave.py
+```
+</details>
 
 ## Verwendung
 
 ```bash
-cd ~/dev/fbsave
-
-# Standard: sichtbarer Browser, Ziel-URL ist als Default im Skript hinterlegt
-./fbsave/bin/python fbsave.py
+# Standard: sichtbarer Browser, knappe Fortschrittsanzeige,
+# Ziel-URL ist als Default im Skript hinterlegt
+uv run fbsave.py
 
 # Unsichtbar / andere URL / Schnelltest des Zeitparsers
-./fbsave/bin/python fbsave.py --headless
-./fbsave/bin/python fbsave.py --url "https://www.facebook.com/..."
-./fbsave/bin/python fbsave.py --selftest
+uv run fbsave.py --headless
+uv run fbsave.py --url "https://www.facebook.com/..."
+uv run fbsave.py --selftest
+
+# Fehlersuche: ausführliches Log + Debug-Dateien (Screenshots/HTML je Schritt)
+uv run fbsave.py --debug
+```
+
+Die normale Terminal-Ausgabe zeigt nur den Fortschritt und am Ende, was
+gesichert wurde und wo es liegt:
+
+```
+🎯 Post: https://www.facebook.com/...
+🍪 Cookie-Hinweis bestätigt
+↕️  Sortierung umgestellt auf: Alle Kommentare
+✅ Alles aufgefaltet — 214 Kommentar-Elemente sichtbar (38 Runden)
+✅ 187 Kommentare/Antworten erfasst
+
+📊 Ergebnis: 187 Beiträge gesichert — 142 Kommentare, 45 Antworten
+   Zeitstempel: 185 exakt (von Facebook geliefert), 2 aus Relativzeit berechnet
+
+📁 Ordner:       captures/capture_20260610T120301Z/
+📄 Tabelle:      captures/capture_20260610T120301Z/comments.csv
+🖼️  Screenshots:  187 × comment_NNN.png + full_page.png
+🔏 Manifest:     captures/capture_20260610T120301Z/manifest.json (UTC-Zeitstempel + SHA256-Hashes)
 ```
 
 ### Login
 
 Eine in `state.json` gespeicherte Session wird automatisch benutzt (erzeugen
-mit `./fbsave/bin/python save_login.py`: manuell einloggen, Enter drücken).
+mit `uv run save_login.py`: manuell einloggen, Enter drücken).
 Ohne Login zeigt Facebook je nach Region nur eine Login-Wand — das Skript
 erkennt das und bricht mit Hinweis ab. `state.json` enthält Session-Cookies —
 nicht weitergeben (steht in `.gitignore`).
@@ -65,7 +103,7 @@ nicht weitergeben (steht in `.gitignore`).
 | `full_page.png`, `full_dialog.png` | Gesamt-Screenshots |
 | `manifest.json` | URLs, Seitentitel, Start/Ende UTC, Versionen, Zähler, SHA256 jeder Datei |
 
-### Debug-Dateien (für Fehlersuche, ebenfalls gehasht)
+### Debug-Dateien (nur mit `--debug`, ebenfalls gehasht)
 
 | Datei | Inhalt |
 |---|---|
@@ -97,5 +135,6 @@ dumpt (`probe_out/`), ohne eine Beweissicherung zu erzeugen.
 - Auch bei Fehlern/Abbruch (Strg-C) werden CSV und Manifest mit den bis dahin
   gesammelten Daten geschrieben.
 - Facebook ändert sein Markup regelmäßig. Wenn ein Lauf 0 Kommentare liefert:
-  `debug_structure_*.json` und die HTML-Dumps zeigen, welche aria-Labels und
-  Button-Texte aktuell verwendet werden.
+  mit `--debug` erneut laufen lassen — `debug_structure_*.json` und die
+  HTML-Dumps zeigen, welche aria-Labels und Button-Texte aktuell verwendet
+  werden.
