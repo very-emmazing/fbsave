@@ -1,0 +1,8 @@
+# Capture-Ergebnisse (Beweismaterial gehoert nicht ins Repo)
+captures/
+
+# Login-Session mit Cookies — NIEMALS committen
+state.json
+
+__pycache__/
+*.pyc
