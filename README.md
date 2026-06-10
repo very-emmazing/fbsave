@@ -1,91 +1,101 @@
 # fbsave — Beweissicherung von Facebook-Kommentaren
 
-Dokumentiert alle Kommentare (inkl. Antworten) unter einem öffentlichen
-Facebook-Post für eine Strafanzeige: Einzel-Screenshot pro Kommentar,
-Gesamt-Screenshot, CSV mit Autor/Profillink/Zeitstempel/Text sowie ein
-`manifest.json` mit UTC-Zeitstempeln des Laufs und SHA256-Hashes aller Dateien.
+Dokumentiert alle Kommentare (inkl. Antworten und Antworten auf Antworten)
+unter einem öffentlichen Facebook-Post für eine Strafanzeige: Einzel-Screenshot
+pro Kommentar, Gesamt-Screenshot, CSV mit Autor/Profillink/Zeitstempel/Text
+sowie ein `manifest.json` mit UTC-Zeitstempeln des Laufs und SHA256-Hashes
+aller Dateien.
 
-Technik: Playwright steuert Chromium und lädt den Post über
-`mbasic.facebook.com` (serverseitig gerendert — kein Modal wie auf
-`www.facebook.com`, kein App-Interstitial wie auf `m.facebook.com`).
+Technik: Playwright steuert Chromium auf `www.facebook.com`. (`mbasic.` und
+`m.facebook.com` werden von Meta inzwischen dorthin umgeleitet — der frühere
+mbasic-Ansatz funktioniert nicht mehr.) Kommentare sind `div[role="article"]`-
+Elemente; Autor und Relativzeit stehen im `aria-label`, die **exakte**
+Kommentarzeit (Unix-Epoch) wird aus dem von Facebook mitgelieferten
+Relay-/GraphQL-JSON geerntet.
 
 ## Setup
 
-Playwright ist via pipx in `~/.venv/playwright/` installiert. Falls die
-Chromium-Binaries noch fehlen:
+Das Projekt-venv liegt in `./fbsave/`. Falls Chromium fehlt:
 
 ```bash
-~/.venv/playwright/bin/python -m playwright install chromium
+./fbsave/bin/python -m playwright install chromium
 ```
 
 ## Verwendung
 
 ```bash
-cd fbsave
+cd ~/dev/fbsave
 
-# Standard: sichtbarer Browser (zum Zuschauen/Debuggen), Ziel-URL ist
-# als Default im Skript hinterlegt
-~/.venv/playwright/bin/python fbsave.py
+# Standard: sichtbarer Browser, Ziel-URL ist als Default im Skript hinterlegt
+./fbsave/bin/python fbsave.py
 
-# Andere Post-URL
-~/.venv/playwright/bin/python fbsave.py --url "https://www.facebook.com/..."
-
-# Ohne sichtbares Fenster (erst wenn alles zuverlässig läuft)
-~/.venv/playwright/bin/python fbsave.py --headless
+# Unsichtbar / andere URL / Schnelltest des Zeitparsers
+./fbsave/bin/python fbsave.py --headless
+./fbsave/bin/python fbsave.py --url "https://www.facebook.com/..."
+./fbsave/bin/python fbsave.py --selftest
 ```
 
-### Falls Facebook einen Login verlangt
+### Login
 
-Manche Posts/Regionen zeigen ohne Login nur eine Login-Wand. Dann einmalig:
-
-```bash
-~/.venv/playwright/bin/python save_login.py   # manuell einloggen, Enter drücken
-~/.venv/playwright/bin/python fbsave.py       # state.json wird automatisch benutzt
-```
-
-`state.json` enthält Session-Cookies — nicht weitergeben (steht in `.gitignore`).
+Eine in `state.json` gespeicherte Session wird automatisch benutzt (erzeugen
+mit `./fbsave/bin/python save_login.py`: manuell einloggen, Enter drücken).
+Ohne Login zeigt Facebook je nach Region nur eine Login-Wand — das Skript
+erkennt das und bricht mit Hinweis ab. `state.json` enthält Session-Cookies —
+nicht weitergeben (steht in `.gitignore`).
 
 ## Ablauf des Skripts
 
-1. URL wird auf `mbasic.facebook.com` umgeschrieben und geladen
-2. Cookie-/Consent-Dialog wird weggeklickt; weil danach oft eine Weiterleitung
-   stattfindet, wird die Post-URL anschließend **neu geladen**
-3. Alle „Weitere Kommentare anzeigen"-Links werden wiederholt geklickt,
-   bis nichts mehr nachzuladen ist (Limit: `--max-rounds`, Default 200)
-4. Gesamt-Screenshot + Extraktion der Top-Level-Kommentare
-5. Jeder Antwort-Thread („3 Antworten" …) wird einzeln geöffnet, aufgefaltet
-   und extrahiert
+1. Post laden (URL wird auf `www.facebook.com` normalisiert)
+2. Cookie-Consent wegklicken, falls vorhanden (nur ohne Login), danach neu laden
+3. Kommentar-Sortierung auf **„Alle Kommentare"** umstellen (sonst blendet
+   „Relevanteste zuerst" Kommentare aus!)
+4. Auffalt-Schleife: „Weitere Kommentare ansehen", „Alle X Antworten ansehen",
+   „Mehr anzeigen" (abgeschnittene Texte) — bis nichts mehr nachlädt
+5. Gesamt-Screenshots, dann Extraktion pro `role=article`:
+   Autor + Relativzeit aus `aria-label`, Profillink, Kommentar-ID aus den
+   Links, Text, Bild-Alt-Texte, Einzel-Screenshot
+6. Exakte Zeitstempel aus den gesammelten GraphQL-Antworten zuordnen
 
-Nach **jedem** Schritt entsteht ein nummerierter Debug-Screenshot
-(`debug_NN_<schritt>.png`) und Seitentitel + URL werden ausgegeben — wenn etwas
-hakt, zeigen diese Dateien genau, an welchem Schritt es war.
-
-## Ausgabe
-
-Pro Lauf entsteht `captures/capture_<UTC-Zeit>/` mit:
+## Ausgabe (`captures/capture_<UTC>/`)
 
 | Datei | Inhalt |
 |---|---|
-| `comments.csv` | `index, comment_id, is_reply, parent_id, author, profile_url, timestamp_raw, timestamp_utc, text, screenshot_file, source_url` (UTF-8 mit BOM, Excel-tauglich) |
+| `comments.csv` | `index, comment_id, is_reply, parent_id, parent_author, author, profile_url, timestamp_raw, timestamp_utc, timestamp_source, text, attachment_alt, screenshot_file, aria_label` (UTF-8-BOM, Excel-tauglich) |
 | `comment_NNN.png` | Einzel-Screenshot pro Kommentar/Antwort |
-| `full_page.png` | Gesamt-Screenshot der aufgefalteten Seite |
-| `debug_NN_*.png` | Debug-Screenshots je Schritt |
-| `manifest.json` | Ziel-URL, final geladene URL, Seitentitel, Start/Ende des Laufs in UTC (ISO 8601), Versionen, Kommentaranzahl, SHA256 jeder Datei |
+| `full_page.png`, `full_dialog.png` | Gesamt-Screenshots |
+| `manifest.json` | URLs, Seitentitel, Start/Ende UTC, Versionen, Zähler, SHA256 jeder Datei |
+
+### Debug-Dateien (für Fehlersuche, ebenfalls gehasht)
+
+| Datei | Inhalt |
+|---|---|
+| `debug_NN_<schritt>.png/.html` | Screenshot + kompletter HTML-Dump nach jedem Schritt |
+| `debug_structure_*.json` | DOM-Diagnose: Anzahl Artikel, alle aria-Labels, alle Button-Texte, Dialoge — zeigt sofort, welcher Selektor nicht greift |
+| `debug_graphql_times.json` | alle geernteten exakten Zeitstempel je Kommentar-ID |
+| `debug_skipped_arias.json` | aria-Labels, die keinem Kommentar-Muster entsprachen (nur falls vorhanden) |
+
+`probe.py` ist ein eigenständiges Diagnose-Werkzeug, das nur die DOM-Struktur
+dumpt (`probe_out/`), ohne eine Beweissicherung zu erzeugen.
 
 ## Wichtige Hinweise zur Beweiskraft
 
-- **Zeitstempel:** mbasic zeigt nur *relative* Zeiten („5 Std.", „Gestern um
-  14:32"). `timestamp_raw` ist der wörtliche Seiteninhalt (der eigentliche
-  Beleg, auch auf den Screenshots sichtbar). `timestamp_utc` wird daraus
-  relativ zur Capture-Zeit **berechnet** und ist eine Näherung in der
-  Granularität der Anzeige (z. B. ±30 min bei „5 Std."). Nicht parsebare
-  Formate lassen `timestamp_utc` leer — `timestamp_raw` bleibt erhalten.
+- **Zeitstempel:** `timestamp_source=graphql_exact` heißt: exakte, von Facebook
+  selbst gelieferte Kommentarzeit (sekundengenau, UTC). Nur wenn keine
+  Kommentar-ID zuordenbar ist, wird die angezeigte Relativzeit
+  (`timestamp_raw`, auch auf den Screenshots sichtbar) relativ zur Capture-Zeit
+  umgerechnet (`computed_from_relative`, Näherung). Das Manifest zählt beide
+  Quellen aus.
+- **Bild-Kommentare:** Kommentare ohne Text (nur Bild/GIF/Sticker) haben ein
+  leeres `text`-Feld; das Bild ist im Einzel-Screenshot gesichert und sein
+  Alt-Text steht in `attachment_alt`.
 - **Hashes:** `manifest.json` wird zuletzt geschrieben und enthält SHA256 aller
-  übrigen Dateien. Verzeichnis nach dem Lauf nicht mehr verändern; ideal
-  zusätzlich sofort archivieren (z. B. ZIP) und den Manifest-Hash separat
-  notieren/versenden, um den Zeitpunkt zu belegen.
-- **mbasic-Abschaltung:** Meta schaltet mbasic schrittweise ab. Leitet die
-  Seite auf `www.facebook.com` um, gibt das Skript eine Warnung aus — dann
-  bitte melden, die Selektoren müssen dann angepasst werden.
+  übrigen Dateien. Verzeichnis nach dem Lauf nicht mehr verändern; ideal sofort
+  archivieren (ZIP) und den Manifest-Hash separat notieren/versenden.
+- **Sortierung:** Wenn das Umstellen auf „Alle Kommentare" fehlschlägt, warnt
+  das Skript — dann können von Facebook ausgeblendete Kommentare fehlen
+  (`manifest.json: sorted_to_all_comments`).
 - Auch bei Fehlern/Abbruch (Strg-C) werden CSV und Manifest mit den bis dahin
   gesammelten Daten geschrieben.
+- Facebook ändert sein Markup regelmäßig. Wenn ein Lauf 0 Kommentare liefert:
+  `debug_structure_*.json` und die HTML-Dumps zeigen, welche aria-Labels und
+  Button-Texte aktuell verwendet werden.

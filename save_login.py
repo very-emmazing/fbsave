@@ -26,7 +26,7 @@ def main() -> int:
         browser = pw.chromium.launch(headless=False)
         context = browser.new_context(locale="de-DE")
         page = context.new_page()
-        page.goto("https://mbasic.facebook.com/login", wait_until="load")
+        page.goto("https://www.facebook.com/login", wait_until="load")
         print("Bitte im Browserfenster einloggen.")
         input("Danach hier Enter druecken, um die Session zu speichern... ")
         context.storage_state(path=STATE_FILE)

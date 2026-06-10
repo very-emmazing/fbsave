@@ -1,5 +1,10 @@
 # Capture-Ergebnisse (Beweismaterial gehoert nicht ins Repo)
 captures/
+captures_test/
+
+# Diagnose-Ausgaben
+probe_out/
+full_run.log
 
 # Login-Session mit Cookies — NIEMALS committen
 state.json
