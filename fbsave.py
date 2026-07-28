@@ -126,13 +126,17 @@ SORT_TARGET_RE = r"alle kommentare|all comments"
 
 # Auffalt-Buttons: weitere Kommentare, Antwort-Threads, abgeschnittene Texte.
 # Live beobachtete Texte: "Weitere Kommentare ansehen", "Alle 26 Antworten
-# ansehen", "Antwort ansehen", "Mehr anzeigen".
+# ansehen", "Antwort ansehen", "Mehr anzeigen", und auf www.facebook.com die
+# Reply-Thread-Buttons "<Name> hat geantwortet · N Antworten <Zeit>" /
+# "<Name> replied · N replies".
 EXPAND_RE = (
     r"weitere kommentare (ansehen|anzeigen)"
     r"|vorherige kommentare"
     r"|view (more|previous) comments"
     r"|antwort(en)? ansehen"
     r"|weitere antwort(en)?"
+    r"|hat geantwortet"
+    r"|\breplied\b"
     r"|view (all )?\d+ (more )?repl(y|ies)"
     r"|view (more )?repl(y|ies)"
     r"|mehr anzeigen"
