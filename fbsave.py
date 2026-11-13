@@ -14,6 +14,7 @@ dokumentiert sie:
   - comment_NNN.png               Einzel-Screenshot pro Kommentar/Antwort
   - full_page.png                 Gesamt-Screenshot der aufgefalteten Seite
   - comments.csv                  author, profile_url, timestamps, text, ...
+  - comments.json                 Kommentardaten als Baum mit verschachtelten Antworten
   - manifest.json                 UTC-Zeitstempel des Laufs + SHA256 aller Dateien
 
 Mit --debug zusaetzlich:
@@ -121,8 +122,9 @@ COOKIE_ACCEPT_RE = re.compile(
 )
 
 # Sortier-Umschalter ueber der Kommentarliste ("Relevanteste zuerst" etc.)
-SORT_BUTTON_RE = r"relevanteste|most relevant|neueste zuerst|newest|top comments"
-SORT_TARGET_RE = r"alle kommentare|all comments"
+SORT_BUTTON_RE = (r"^(relevanteste( zuerst)?|most relevant|neueste zuerst|newest|"
+                  r"top comments|alle kommentare|all comments)$")
+SORT_TARGET_RE = re.compile(r"^(alle kommentare|all comments)$", re.I)
 
 # Auffalt-Buttons: weitere Kommentare, Antwort-Threads, abgeschnittene Texte.
 # Live beobachtete Texte: "Weitere Kommentare ansehen", "Alle 26 Antworten
@@ -585,42 +587,81 @@ def count_articles(scope) -> int:
         return -1
 
 
+def find_sort_button(scope):
+    return scope.evaluate_handle(r"""(el, pattern) => {
+        const title = new RegExp(pattern, 'i');
+        const buttons = [...el.querySelectorAll('button, [role="button"]')];
+        const matches = buttons.filter(b => b.getClientRects().length &&
+            // Nur die erste Zeile ist der Titel, wie in sort_title().
+            title.test((b.innerText || '').split('\n')[0].replace(/\ufeff/g, '')
+                .trim().replace(/\s+/g, ' ')));
+        return matches.find(b => b.getAttribute('aria-haspopup') === 'menu')
+            || matches[0] || null;
+    }""", SORT_BUTTON_RE).as_element()
+
+
+def sort_title(text: str) -> str:
+    return " ".join(text.partition("\n")[0].replace("\ufeff", "").split())
+
+
 def switch_sort_to_all_comments(page, scope, stepper: Stepper) -> bool:
-    clicked = click_button_matching(scope, SORT_BUTTON_RE, exclude=[])
-    if not clicked:
-        ui.detail("    Kein Sortier-Umschalter gefunden (evtl. schon 'Alle Kommentare').")
-        return False
-    ui.detail(f"    Sortier-Umschalter geklickt: {clicked!r}")
-    page.wait_for_timeout(1500)
-    # Menue rendert als Portal auf Dokumentebene -> auf der ganzen Seite suchen
-    target = None
     try:
-        target = page.evaluate("""(pattern) => {
-            const re = new RegExp(pattern, 'i');
-            for (const m of document.querySelectorAll('[role="menuitem"]')) {
-              const t = (m.innerText || '').trim().replace(/\\s+/g, ' ');
-              if (re.test(t)) { m.click(); return t; }
-            }
-            return null;
-        }""", SORT_TARGET_RE)
+        button = find_sort_button(scope)
+        if button is not None:
+            current = sort_title(button.inner_text())
+            if SORT_TARGET_RE.fullmatch(current):
+                ui.say(f"↕️  Sortierung aktiv: {current}")
+                return True
+            button.click(timeout=5000)
+            ui.detail(f"    Sortier-Umschalter geklickt: {current!r}")
+
+            # Das Menü liegt außerhalb des Dialogs. Nur die erste Zeile ist
+            # der Titel. Auch die Beschreibung von „Neueste zuerst“ enthält
+            # die Wörter „Alle Kommentare“.
+            options = page.locator('[role="menuitem"]:visible')
+            options.first.wait_for(timeout=5000)
+            for option in options.all():
+                title = sort_title(option.inner_text(timeout=5000))
+                if SORT_TARGET_RE.fullmatch(title):
+                    option.click(timeout=5000)
+                    page.wait_for_timeout(2500)
+                    selected = find_sort_button(get_scope(page))
+                    if selected is not None and SORT_TARGET_RE.fullmatch(
+                            sort_title(selected.inner_text())):
+                        ui.say(f"↕️  Sortierung umgestellt auf: {title}")
+                        stepper.step(page, "sortierung_alle_kommentare", save_html=True)
+                        return True
+                    break
     except Exception as exc:
-        ui.detail(f"    Menue-Klick fehlgeschlagen: {exc}")
-    if target:
-        ui.say(f"↕️  Sortierung umgestellt auf: {target}")
-        page.wait_for_timeout(2500)
-        stepper.step(page, "sortierung_alle_kommentare", save_html=True)
-        return True
-    ui.warn("Menuepunkt 'Alle Kommentare' nicht gefunden — Reihenfolge bleibt "
-            "'Relevanteste'; ggf. fehlen ausgeblendete Kommentare!")
+        ui.detail(f"    Sortierwechsel fehlgeschlagen: {exc}")
+    ui.warn("Sortierung 'Alle Kommentare' konnte nicht bestätigt werden. "
+            "Facebook kann Kommentare ausblenden.")
     stepper.step(page, "sortier_menue_ohne_treffer", save_html=True)
     return False
 
 
-def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> None:
+def scroll_comment_list_to_end(scope) -> None:
+    scope.evaluate("""el => {
+      const articles = el.querySelectorAll('div[role="article"]');
+      const last = articles[articles.length - 1];
+      for (let parent = last?.parentElement; parent && el.contains(parent);
+           parent = parent.parentElement) {
+        const overflow = getComputedStyle(parent).overflowY;
+        if (/^(auto|scroll|overlay)$/.test(overflow) &&
+            parent.scrollHeight > parent.clientHeight) {
+          parent.scrollTop = parent.scrollHeight;
+          return;
+        }
+      }
+      last?.scrollIntoView({block: 'end'});
+    }""")
+
+
+def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> bool:
     """Klickt alle Auffalt-Buttons (weitere Kommentare / Antworten / Mehr anzeigen),
     bis nichts mehr da ist. www = AJAX, kein Seitenwechsel."""
     idle = 0
-    visible = 0
+    visible = count_articles(get_scope(page))
     for round_no in range(1, max_rounds + 1):
         scope = get_scope(page)  # nach React-Re-Renders neu greifen
         clicked = click_button_matching(scope, EXPAND_RE)
@@ -628,32 +669,36 @@ def expand_everything(page, stepper: Stepper, drain, max_rounds: int) -> None:
             idle = 0
             page.wait_for_timeout(1200)
             drain()
-            visible = count_articles(scope)
+            visible = count_articles(get_scope(page))
             ui.progress(f"Lade nach … Klick {round_no}, {visible} Kommentar-Elemente sichtbar")
             ui.detail(f"    Runde {round_no}: {clicked!r} geklickt "
                       f"({visible} Artikel sichtbar)")
             if round_no % 10 == 0:
                 stepper.step(page, f"auffalten_runde_{round_no}")
             continue
-        # nichts gefunden: ans Ende scrollen (Lazy-Loading) und nochmal pruefen
-        idle += 1
-        ui.progress(f"Prüfe auf weitere Inhalte … ({idle}/3, "
+        # Erst nach dem letzten Scrollversuch nochmals nach Buttons suchen.
+        if idle >= 3 and visible < 0:
+            ui.warn("Kommentare konnten nicht gezählt werden — unklar, ob "
+                    "alles nachgeladen wurde!")
+            return False
+        if idle >= 3:
+            ui.done(f"Keine weiteren Kommentare nachgeladen — {visible} "
+                    f"Kommentar-Elemente sichtbar ({round_no - 1} Runden)")
+            return True
+        ui.progress(f"Prüfe auf weitere Inhalte … ({idle + 1}/3, "
                     f"{visible} Kommentar-Elemente sichtbar)")
         try:
-            scope.evaluate(
-                "el => { const a = el.querySelectorAll('div[role=\"article\"]');"
-                " if (a.length) a[a.length-1].scrollIntoView({block:'center'}); }")
-        except Exception:
-            pass
+            scroll_comment_list_to_end(scope)
+        except Exception as exc:
+            ui.detail(f"    Scrollen fehlgeschlagen: {exc}")
         page.wait_for_timeout(1500)
         drain()
-        if idle >= 3:
-            visible = count_articles(get_scope(page))
-            ui.done(f"Alles aufgefaltet — {visible} Kommentar-Elemente sichtbar "
-                    f"({round_no} Runden)")
-            return
+        loaded = count_articles(get_scope(page))
+        idle = idle + 1 if loaded == visible else 0
+        visible = loaded
     ui.warn(f"--max-rounds ({max_rounds}) erreicht, "
             f"moeglicherweise nicht alles aufgefaltet!")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -784,7 +829,7 @@ def extract_comments(page, scope, rows, seen, outdir: Path,
 
 
 # ---------------------------------------------------------------------------
-# Ausgabe: CSV + Manifest
+# Ausgabe: CSV + JSON + Manifest
 # ---------------------------------------------------------------------------
 
 CSV_FIELDS = ["index", "comment_id", "is_reply", "parent_id", "parent_author",
@@ -801,12 +846,51 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def build_comment_tree(rows) -> list:
+    nodes = [dict(row, replies=[]) for row in rows]
+    by_id = {node["comment_id"]: node for node in nodes if node["comment_id"]}
+    parents_by_index = {}
+    roots = []
+
+    for node in nodes:
+        parent = by_id.get(node["parent_id"])
+        if node["is_reply"] != "ja" or parent is None:
+            roots.append(node)
+            continue
+
+        # Der Link kann auf den Hauptkommentar zeigen, das Label auf eine Antwort.
+        # parse_aria() kann bei "auf Andreas Kommentar" das Genitiv-s mit
+        # abschneiden ("Andrea"), daher ein fehlendes "s" am Ende tolerieren.
+        parent_author = node["parent_author"].rstrip("'’")
+        author = parent["author"].rstrip("'’")
+        if parent_author and author not in (parent_author, parent_author + "s"):
+            roots.append(node)
+            continue
+
+        # Verhindert eine Schleife bei widerspruechlichen Eltern-IDs.
+        ancestor = parent
+        while ancestor is not None and ancestor is not node:
+            ancestor = parents_by_index.get(ancestor["index"])
+        if ancestor is node:
+            roots.append(node)
+            continue
+
+        parent["replies"].append(node)
+        parents_by_index[node["index"]] = parent
+
+    return roots
+
+
 def write_outputs(outdir: Path, rows, manifest: dict) -> None:
     csv_path = outdir / "comments.csv"
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+    json_path = outdir / "comments.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(build_comment_tree(rows), f, ensure_ascii=False, indent=2)
 
     manifest["comment_count"] = len(rows)
     manifest["timestamp_sources"] = {
@@ -840,6 +924,7 @@ def write_outputs(outdir: Path, rows, manifest: dict) -> None:
     ui.say()
     ui.say(f"📁 Ordner:       {outdir}/")
     ui.say(f"📄 Tabelle:      {csv_path}")
+    ui.say(f"📄 JSON:         {json_path}")
     ui.say(f"🖼️  Screenshots:  {shots} × comment_NNN.png + full_page.png")
     ui.say(f"🔏 Manifest:     {outdir / 'manifest.json'} "
            f"(UTC-Zeitstempel + SHA256-Hashes)")
@@ -963,7 +1048,10 @@ def run(args) -> int:
 
             # 4) Alles auffalten (Kommentare, Antworten, 'Mehr anzeigen')
             ui.detail("\n== Kommentare/Antworten auffalten ==")
-            expand_everything(page, stepper, drain, args.max_rounds)
+            manifest["comment_loading_finished"] = expand_everything(
+                page, stepper, drain, args.max_rounds)
+            if not manifest["comment_loading_finished"]:
+                exit_code = 1
             stepper.step(page, "fertig_aufgefaltet", save_html=True)
 
             # 5) Gesamt-Screenshots
@@ -1013,7 +1101,7 @@ def main() -> int:
     global ui
     ap = argparse.ArgumentParser(
         description="Dokumentiert alle Kommentare unter einem oeffentlichen "
-                    "Facebook-Post (Screenshots + CSV + Manifest).")
+                    "Facebook-Post (Screenshots + CSV + JSON + Manifest).")
     ap.add_argument("--url", default=DEFAULT_URL, help="URL des Facebook-Posts")
     ap.add_argument("--headless", action="store_true",
                     help="Browser unsichtbar laufen lassen (Standard: sichtbar)")
@@ -1025,7 +1113,7 @@ def main() -> int:
                          "wird ignoriert, wenn die Datei fehlt)")
     ap.add_argument("--out", default="captures", help="Basis-Ausgabeverzeichnis")
     ap.add_argument("--max-rounds", type=int, default=500,
-                    help="Max. Klicks beim Auffalten")
+                    help="Max. Lade- und Auffaltrunden")
     ap.add_argument("--selftest", action="store_true",
                     help="Nur den Zeitstempel-Parser testen (kein Browser)")
     args = ap.parse_args()
