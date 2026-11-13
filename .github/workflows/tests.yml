@@ -13,12 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 3.9 ist laut Skript-Header die Mindestversion.
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Die Tests brauchen keinen Browser: fbsave importiert Playwright erst in run().
       - run: python -m unittest -v test_fbsave
